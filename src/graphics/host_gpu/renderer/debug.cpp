@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 
 #include "common/assert.h"
+#include "common/profiler.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
@@ -82,6 +83,7 @@ void uc_print(const char* func, const HW::UserConfig& uc) {
 }
 
 void uc_check(const HW::UserConfig& uc) {
+	KYTY_PROFILER_BLOCK("uc_check");
 	const auto& user_en = uc.GetGeUserVgprEn();
 
 	EXIT_NOT_IMPLEMENTED(user_en.vgpr1 != false);
@@ -902,6 +904,7 @@ ScissorRect calc_final_scissor(const HW::ScreenViewport& vp, const HW::ScanModeC
 }
 
 void hw_check(const CommandBuffer& buffer) {
+	KYTY_PROFILER_BLOCK("hw_check");
 	const auto& hw      = buffer.GetRegisters();
 	const auto  rt_slot = render_target_first_bound_slot(buffer);
 	const auto& rt      = hw.GetRenderTarget(rt_slot);

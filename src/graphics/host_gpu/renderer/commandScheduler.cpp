@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 
 #include "common/assert.h"
+#include "common/profiler.h"
 #include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
 
@@ -156,16 +157,19 @@ void CommandScheduler::Begin(HW::Context& registers, HW::UserConfig& user_config
 }
 
 void CommandScheduler::BeginRendering(const RenderState& state) {
+	KYTY_PROFILER_BLOCK("CommandScheduler::BeginRendering");
 	Current().BeginRendering(state);
 }
 
 void CommandScheduler::EndRendering() {
+	KYTY_PROFILER_BLOCK("CommandScheduler::EndRendering");
 	if (Active() && !m_command.IsInvalid()) {
 		Current().EndRendering();
 	}
 }
 
 void CommandScheduler::Flush() {
+	KYTY_PROFILER_BLOCK("CommandScheduler::Flush");
 	SubmitInfo submit;
 	Flush(submit);
 }
@@ -182,6 +186,7 @@ void CommandScheduler::FlushAndWait() {
 }
 
 void CommandScheduler::Finish() {
+	KYTY_PROFILER_BLOCK("CommandScheduler::Finish");
 	CheckActive();
 	if (!m_command.IsInvalid()) {
 		Submit();
@@ -192,6 +197,7 @@ void CommandScheduler::Finish() {
 }
 
 void CommandScheduler::Wait(uint64_t tick) {
+	KYTY_PROFILER_BLOCK("CommandScheduler::Wait");
 	EXIT_IF(tick > CurrentTick());
 	if (tick == CurrentTick()) {
 		CheckActive();

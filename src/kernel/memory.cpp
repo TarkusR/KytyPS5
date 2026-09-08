@@ -12,6 +12,7 @@
 #include "libs/libs.h"
 
 #include <algorithm>
+#include <unordered_map>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -215,6 +216,7 @@ public:
 	bool Add(uint64_t start, uint64_t size, uint64_t offset, int protection, int memory_type,
 	         VirtualRangeType type, const char* name, bool disallow_merge = false) {
 		Common::LockGuard lock(m_mutex);
+		m_generation++;
 
 		if (start == 0 || size == 0) {
 			return false;
@@ -245,6 +247,7 @@ public:
 
 	bool Remove(uint64_t start, uint64_t size) {
 		Common::LockGuard lock(m_mutex);
+		m_generation++;
 
 		auto position = LowerBound(start);
 		if (position != m_ranges.end() && position->start == start && position->size == size) {
@@ -276,6 +279,7 @@ public:
 
 	bool ReleaseReserved(uint64_t start, uint64_t size) {
 		Common::LockGuard lock(m_mutex);
+		m_generation++;
 
 		for (size_t index = 0; index < m_ranges.size(); index++) {
 			auto& r = m_ranges[index];
@@ -290,6 +294,7 @@ public:
 	bool ConsumeReserved(uint64_t start, uint64_t size,
 	                     VirtualRangeType type = VirtualRangeType::Reserved) {
 		Common::LockGuard lock(m_mutex);
+		m_generation++;
 
 		auto end = End(start, size);
 		for (const auto& r: m_ranges) {
@@ -306,6 +311,7 @@ public:
 	bool ConsumeReservedSpan(uint64_t start, uint64_t size, Range* first_range = nullptr,
 	                         VirtualRangeType type = VirtualRangeType::Reserved) {
 		Common::LockGuard lock(m_mutex);
+		m_generation++;
 
 		if (size == 0) {
 			return false;
@@ -337,6 +343,7 @@ public:
 
 	void Rename(uint64_t start, uint64_t size, const char* name) {
 		Common::LockGuard lock(m_mutex);
+		m_generation++;
 
 		auto position = LowerBound(start);
 		if (position != m_ranges.end() && position->start == start && position->size == size) {
@@ -349,6 +356,7 @@ public:
 
 	void Protect(uint64_t start, uint64_t size, int protection) {
 		Common::LockGuard lock(m_mutex);
+		m_generation++;
 
 		EditUnlocked(start, size, [protection](Range* r) { r->protection = protection; });
 	}
@@ -480,7 +488,10 @@ public:
 		return used;
 	}
 
+	[[nodiscard]] uint64_t Generation() const { return m_generation; }
+
 private:
+	uint64_t m_generation = 1;
 	static uint64_t End(uint64_t start, uint64_t size) {
 		return (UINT64_MAX - start < size ? UINT64_MAX : start + size);
 	}
@@ -892,19 +903,52 @@ bool SyncGpuCleanBacking(uint64_t vaddr, uint64_t size) {
 	return true;
 }
 
-uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size) {
+uint64_t TryClampRangeSize(uint64_t vaddr, uint64_t size) {
 	EXIT_IF(g_virtual_ranges == nullptr);
 
+	// The draw path resolves the same descriptor ranges hundreds of thousands of times per
+	// second, so results are memoised until the range set changes.
+	struct ClampKey {
+		uint64_t vaddr;
+		uint64_t size;
+		bool     operator==(const ClampKey&) const = default;
+	};
+	struct ClampKeyHash {
+		size_t operator()(const ClampKey& key) const noexcept {
+			return std::hash<uint64_t> {}(key.vaddr ^ (key.size * 0x9e3779b97f4a7c15ull));
+		}
+	};
+	static thread_local std::unordered_map<ClampKey, uint64_t, ClampKeyHash> cache;
+	static thread_local uint64_t                                             cache_generation = 0;
+
+	const auto generation = g_virtual_ranges->Generation();
+	if (cache_generation != generation) {
+		cache.clear();
+		cache_generation = generation;
+	}
+	const ClampKey key {vaddr, size};
+	if (const auto found = cache.find(key); found != cache.end()) {
+		return found->second;
+	}
+
 	const auto clamped_size = g_virtual_ranges->ClampRangeSize(vaddr, size);
+	if (clamped_size != 0) {
+		cache.emplace(key, clamped_size);
+	}
+	if (clamped_size != 0 && clamped_size != size) {
+		LOGF("Memory: clamped buffer range addr=0x%016" PRIx64 " size=0x%016" PRIx64
+		     " to 0x%016" PRIx64 "\n",
+		     vaddr, size, clamped_size);
+	}
+	return clamped_size;
+}
+
+uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size) {
+	const auto clamped_size = TryClampRangeSize(vaddr, size);
 	if (clamped_size == 0) {
 		EXIT("Memory: attempted to access invalid address 0x%016" PRIx64 " with size 0x%016" PRIx64
 		     "\n",
 		     vaddr, size);
-	}
-	if (clamped_size != size) {
-		LOGF("Memory: clamped buffer range addr=0x%016" PRIx64 " size=0x%016" PRIx64
-		     " to 0x%016" PRIx64 "\n",
-		     vaddr, size, clamped_size);
 	}
 	return clamped_size;
 }

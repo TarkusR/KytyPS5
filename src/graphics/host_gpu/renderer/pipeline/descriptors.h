@@ -47,6 +47,20 @@ struct PreparedBindings {
 	vk::DescriptorBufferInfo              flattened_srt;
 	vk::DescriptorBufferInfo              shader_data_buffer;
 	std::vector<uint32_t>                 shader_data;
+
+	// Reused between draws: clear keeps each vector's capacity so a draw does not reallocate.
+	void Reset() {
+		program  = nullptr;
+		snapshot = nullptr;
+		buffer_sources.clear();
+		buffers.clear();
+		images.clear();
+		samplers.clear();
+		gds                = {nullptr, 0, VK_WHOLE_SIZE};
+		flattened_srt      = {};
+		shader_data_buffer = {};
+		shader_data.clear();
+	}
 };
 
 [[nodiscard]] vk::DescriptorType

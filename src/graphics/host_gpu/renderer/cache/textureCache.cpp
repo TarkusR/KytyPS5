@@ -254,6 +254,8 @@ bool TextureCache::SafeToDownload(const Image& image) {
 }
 
 ImageId TextureCache::InsertImage(const ImageInfo& info) {
+	m_generation++;
+	KYTY_PROFILER_BLOCK("TextureCache::InsertImage");
 	const auto id = m_slot_images.insert(m_graphics, m_scheduler, info);
 	if (!info.data.Empty()) {
 		RegisterImage(id);
@@ -304,6 +306,8 @@ void TextureCache::UnregisterImage(ImageId id) {
 }
 
 void TextureCache::DeleteImage(ImageId id) {
+	m_generation++;
+	KYTY_PROFILER_BLOCK("TextureCache::DeleteImage");
 	auto* image = m_slot_images.try_get(id);
 	if (image == nullptr || !image->registered) {
 		return;
@@ -1069,6 +1073,7 @@ TextureCache::DownloadPlan TextureCache::BuildDownload(const Image& image) const
 }
 
 void TextureCache::UploadImage(Image& image, Buffer& source, uint64_t source_offset) {
+	KYTY_PROFILER_BLOCK("TextureCache::UploadImage");
 	const auto& info    = image.info;
 	const auto  binding = UploadBinding(image);
 	const auto  upload  = [&](std::vector<vk::BufferImageCopy>& copies, TileManager::Result linear) {
@@ -1336,6 +1341,7 @@ void TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 }
 
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
+	KYTY_PROFILER_BLOCK("TextureCache::FindImage");
 	auto& command = m_scheduler.Current();
 	if (command.IsInvalid()) {
 		EXIT("TextureCache: image lookup requires a valid command buffer\n");
@@ -1727,6 +1733,7 @@ void TextureCache::ClearImage(CommandBuffer& command, ImageId id,
 }
 
 void TextureCache::InvalidateMemory(uint64_t address, uint64_t size) {
+	KYTY_PROFILER_BLOCK("TextureCache::InvalidateMemory");
 	if (!GuestRange {address, size}.Valid()) {
 		EXIT("TextureCache: invalid memory-invalidation range\n");
 	}
@@ -2096,6 +2103,7 @@ bool TextureCache::TouchMeta(uint64_t address, uint32_t slice, bool is_clear) {
 }
 
 void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
+	m_generation++;
 	if (!GuestRange {address, size}.Valid()) {
 		EXIT("TextureCache: invalid unmap range\n");
 	}
@@ -2119,6 +2127,7 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 }
 
 void TextureCache::RunGarbageCollector() {
+	KYTY_PROFILER_BLOCK("TextureCache::RunGarbageCollector");
 	std::scoped_lock lock {m_lock};
 	const uint64_t   tick = m_gc_tick++;
 	if (m_graphics.CanReportMemoryUsage()) {
@@ -2180,6 +2189,7 @@ void TextureCache::RunGarbageCollector() {
 }
 
 void TextureCache::ProcessDownloadImages() {
+	KYTY_PROFILER_BLOCK("TextureCache::ProcessDownloadImages");
 	std::scoped_lock lock {m_lock};
 	for (const auto id: m_download_images) {
 		const auto owner = m_slot_images.try_get(id);

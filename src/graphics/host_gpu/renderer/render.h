@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
+#include <unordered_map>
 #include <optional>
 #include <span>
 #include <unordered_set>
@@ -159,7 +160,7 @@ public:
 	                    uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
 	                    uint64_t indirect_args = 0);
 
-	[[nodiscard]] PreparedBindings PrepareBindings(const ShaderStageRuntime& runtime);
+	void PrepareBindings(const ShaderStageRuntime& runtime, PreparedBindings& prepared);
 	void                           FindBuffers(PreparedBindings& bindings);
 	void                           RebindBuffers(PreparedBindings& bindings);
 	void                           RebindImages(PreparedBindings& bindings);
@@ -172,13 +173,17 @@ private:
 	void DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const DrawAutoArgs& args);
 
 	struct GraphicsBindings {
-		PreparedBindings                vertex;
-		std::optional<PreparedBindings> pixel;
+		PreparedBindings vertex;
+		PreparedBindings pixel;
+		bool             pixel_active = false;
 	};
 
 	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	                                            const ShaderRecompiler::IR::DescriptorValue& value);
-	[[nodiscard]] GraphicsBindings PrepareGraphicsBindings(const ShaderStageRuntime& vertex,
+	[[nodiscard]] TextureBinding
+	ResolveTextureUncached(const ShaderRecompiler::IR::ImageResource&   resource,
+	                       const ShaderRecompiler::IR::DescriptorValue& value);
+	[[nodiscard]] GraphicsBindings& PrepareGraphicsBindings(const ShaderStageRuntime& vertex,
 	                                                       const ShaderStageRuntime& pixel,
 	                                                       bool                      pixel_active);
 	void ResolveRenderColorTarget(uint64_t submit_id, CommandBuffer& buffer,
@@ -198,7 +203,7 @@ private:
 	                         bool set_bind_debug, bool set_auto_debug);
 	[[nodiscard]] RenderState AcquireRenderTargets(CommandBuffer& buffer, RenderColorInfo* colors,
 	                                               uint32_t color_count, RenderDepthInfo& depth,
-	                                               const std::optional<PreparedBindings>& pixel = std::nullopt);
+	                                               const PreparedBindings* pixel = nullptr);
 	[[nodiscard]] bool        ResolveColorTargets(uint64_t submit_id, CommandBuffer& buffer,
 	                                              uint32_t render_target_slice_offset);
 	void                      BindImage(ImageId id, bool storage);
@@ -212,6 +217,30 @@ private:
 	[[nodiscard]] bool TryConsumeComputeImageClear(const ShaderComputeInputInfo& input,
 	                                              CommandBuffer& command, uint32_t group_x,
 	                                              uint32_t group_y, uint32_t group_z, uint32_t mode);
+
+	// Draw bindings are rebuilt every draw; keeping one instance preserves the vector capacities
+	// instead of reallocating them per draw.
+	GraphicsBindings                      m_graphics_bindings;
+	PreparedBindings                      m_compute_bindings;
+
+	// ResolveTexture runs several times per draw and repeats the same descriptor decode and
+	// cache lookup. Results are memoised per T# and revalidated on every hit.
+	struct TextureLookupKey {
+		std::array<uint32_t, 8>                    dwords {};
+		const ShaderRecompiler::IR::ImageResource* resource = nullptr;
+		bool operator==(const TextureLookupKey&) const = default;
+	};
+	struct TextureLookupKeyHash {
+		std::size_t operator()(const TextureLookupKey& key) const noexcept {
+			std::size_t hash = std::hash<const void*> {}(key.resource);
+			for (const auto word: key.dwords) {
+				hash = hash * 1099511628211ull ^ word;
+			}
+			return hash;
+		}
+	};
+	std::unordered_map<TextureLookupKey, TextureBinding, TextureLookupKeyHash> m_texture_lookup;
+	uint64_t m_texture_lookup_generation = 0;
 
 	RenderContext&                        m_context;
 	std::vector<ImageId>                  m_bound_images;

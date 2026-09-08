@@ -111,6 +111,8 @@ public:
 	Inst& operator=(Inst&&)      = delete;
 
 	[[nodiscard]] ValueOpcode             GetOpcode() const;
+	[[nodiscard]] uint32_t                EvalIndex() const { return eval_index; }
+	void                                  SetEvalIndex(uint32_t index) { eval_index = index; }
 	[[nodiscard]] Type                    GetType() const;
 	[[nodiscard]] bool                    MayHaveSideEffects() const;
 	[[nodiscard]] bool                    HasUses() const;
@@ -151,6 +153,7 @@ private:
 
 	ValueOpcode         opcode;
 	uint64_t            flags;
+	uint32_t            eval_index = UINT32_MAX;
 	Block*              parent = nullptr;
 	std::vector<Value>  args;
 	std::vector<Block*> phi_blocks;

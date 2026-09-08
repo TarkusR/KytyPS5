@@ -317,8 +317,14 @@ struct PipelineCache::ProgramCache {
 		lookup_key.hash            = params.hash;
 		lookup_key.user_data_count = static_cast<uint32_t>(params.user_data.size());
 		lookup_key.code_size       = static_cast<uint32_t>(params.code.size());
-		BuildStageStaticKey(input_info, lookup_key.static_state);
-		auto                                         entry = programs.find(lookup_key);
+		{
+			KYTY_PROFILER_BLOCK("ProgramGet::BuildStaticKey");
+			BuildStageStaticKey(input_info, lookup_key.static_state);
+		}
+		auto entry = [&] {
+			KYTY_PROFILER_BLOCK("ProgramGet::MapFind");
+			return programs.find(lookup_key);
+		}();
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		const ShaderRecompiler::IR::SrtRuntime       runtime {
@@ -329,10 +335,14 @@ struct PipelineCache::ProgramCache {
 		};
 		ShaderRecompiler::IR::MaterializeReport report;
 		if (entry != programs.end()) {
-			ReportMaterialization(label, stage, params.hash, report,
-			                      ShaderRecompiler::IR::MaterializeResources(
-			                          entry->second.resource_plan, runtime, resources,
-			                          specialization, &report));
+			{
+				KYTY_PROFILER_BLOCK("ProgramGet::MaterializeResources");
+				ReportMaterialization(label, stage, params.hash, report,
+				                      ShaderRecompiler::IR::MaterializeResources(
+				                          entry->second.resource_plan, runtime, resources,
+				                          specialization, &report));
+			}
+			KYTY_PROFILER_BLOCK("ProgramGet::PermutationScan");
 			if (const auto permutation = std::ranges::find_if(
 			        entry->second.permutations, [&](const Permutation& candidate) {
 				        const auto& layout = candidate.program.bindings;
@@ -595,6 +605,8 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
     std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping, bool pixel_active,
     ShaderVertexInputInfo& vertex_info, ShaderPixelInputInfo& pixel_info) {
+	KYTY_PROFILER_BLOCK("PipelineCache::GetGraphicsPrograms");
+
 	const auto vertex_params = PrepareProgram(vertex_regs, context, user_config, vertex_info);
 	const bool mesh_active   = vertex_info.mesh.threads_num[0] != 0;
 	if (mesh_active) {
@@ -633,14 +645,22 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		    static_cast<float>(std::min(limits.maxViewportDimensions[1], 16384u)) * 0.5f;
 		clip.enabled = true;
 	}
-	Common::LockGuard lock(m_mutex);
+	std::optional<Common::LockGuard> lock;
+	{
+		KYTY_PROFILER_BLOCK("GetPrograms::LockWait");
+		lock.emplace(m_mutex);
+	}
 	uint32_t          push_data_cursor =
 	    mesh_active ? ShaderRecompiler::IR::PushData::MeshDrawDwordCount : 0;
 	GraphicsPrograms  result;
 	if (pixel_active) {
+		KYTY_PROFILER_BLOCK("GetPrograms::GetPixel");
 		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor);
 	}
-	result.vertex = m_program_cache->Get(vertex_params, vertex_info, push_data_cursor);
+	{
+		KYTY_PROFILER_BLOCK("GetPrograms::GetVertex");
+		result.vertex = m_program_cache->Get(vertex_params, vertex_info, push_data_cursor);
+	}
 	return result;
 }
 

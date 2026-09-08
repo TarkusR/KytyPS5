@@ -575,6 +575,31 @@ static ImageViewInfo TextureViewInfo(const ShaderRecompiler::IR::ImageResource& 
 
 TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
                                               const ShaderRecompiler::IR::DescriptorValue& value) {
+	KYTY_PROFILER_BLOCK("RenderExecutor::ResolveTexture");
+	auto& texture_cache_memo = m_context.GetTextureCache();
+	if (m_texture_lookup_generation != texture_cache_memo.Generation()) {
+		m_texture_lookup.clear();
+		m_texture_lookup_generation = texture_cache_memo.Generation();
+	}
+	const TextureLookupKey lookup_key {value.dwords, &resource};
+	if (const auto found = m_texture_lookup.find(lookup_key); found != m_texture_lookup.end()) {
+		// A cached image may still have been invalidated or unregistered since the last draw.
+		const auto* image = texture_cache_memo.m_slot_images.try_get(found->second.image_id);
+		if (image != nullptr && image->registered && !image->binding.needs_rebind) {
+			return found->second;
+		}
+		m_texture_lookup.erase(found);
+	}
+	auto binding = ResolveTextureUncached(resource, value);
+	if (!binding.desc.info.data.Empty()) {
+		m_texture_lookup.emplace(lookup_key, binding);
+	}
+	return binding;
+}
+
+TextureBinding
+RenderExecutor::ResolveTextureUncached(const ShaderRecompiler::IR::ImageResource&   resource,
+                                       const ShaderRecompiler::IR::DescriptorValue& value) {
 	auto descriptor = DecodeNativeDescriptor<ShaderTextureResource>(value);
 	const bool storage = resource.written;
 	if (storage) {
@@ -773,6 +798,7 @@ static vk::Sampler NativeSampler(RenderContext&                       context,
                                  const ShaderRecompiler::IR::CompiledShaderInfo& program,
                                  uint32_t index,
                                  const ShaderRecompiler::IR::DescriptorValue& value) {
+	KYTY_PROFILER_BLOCK("NativeSampler");
 	auto descriptor = DecodeNativeDescriptor<ShaderSamplerResource>(value);
 	if (!program.info.samplers[index].depth_compare) {
 		descriptor.fields[0] &= ~(0x7u << 12u);
@@ -828,12 +854,13 @@ void RenderExecutor::ResetBindings() {
 	m_bound_images.clear();
 }
 
-PreparedBindings RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime) {
-	KYTY_PROFILER_FUNCTION();
+void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
+                                    PreparedBindings&         prepared) {
+	KYTY_PROFILER_BLOCK("RenderExecutor::PrepareBindings");
 	EXIT_IF(!runtime);
 	const auto& program  = *runtime.program;
 	const auto& snapshot = runtime.resources;
-	PreparedBindings prepared;
+	prepared.Reset();
 	prepared.program  = runtime.program;
 	prepared.snapshot = &runtime.resources;
 	prepared.images.reserve(program.info.images.size());
@@ -855,11 +882,10 @@ PreparedBindings RenderExecutor::PrepareBindings(const ShaderStageRuntime& runti
 	        program.bindings, ShaderRecompiler::IR::DescriptorBindingKind::Gds) != nullptr) {
 		prepared.gds.buffer = m_context.GetBufferCache().GetGdsBuffer()->Handle();
 	}
-	return prepared;
 }
 
 void RenderExecutor::FindBuffers(PreparedBindings& prepared) {
-	KYTY_PROFILER_FUNCTION();
+	KYTY_PROFILER_BLOCK("RenderExecutor::FindBuffers");
 	EXIT_IF(prepared.program == nullptr || prepared.snapshot == nullptr);
 	const auto& program  = *prepared.program;
 	const auto& snapshot = *prepared.snapshot;
@@ -878,13 +904,19 @@ void RenderExecutor::FindBuffers(PreparedBindings& prepared) {
 			prepared.buffer_sources.push_back({});
 			continue;
 		}
-		const auto size = Libs::LibKernel::Memory::ClampRangeSize(address, requested_size);
+		// An unmapped descriptor range is an unbound slot: the guest can leave it stale when the
+		// shader never reaches the access that would use it. Hardware does not fault there.
+		const auto size = Libs::LibKernel::Memory::TryClampRangeSize(address, requested_size);
+		if (size == 0) {
+			prepared.buffer_sources.push_back({});
+			continue;
+		}
 		prepared.buffer_sources.push_back({address, size, cache.FindBuffer(address, size)});
 	}
 }
 
 void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
-	KYTY_PROFILER_FUNCTION();
+	KYTY_PROFILER_BLOCK("RenderExecutor::RebindBuffers");
 	EXIT_IF(prepared.program == nullptr || prepared.snapshot == nullptr);
 	const auto& program   = *prepared.program;
 	const auto& snapshot  = *prepared.snapshot;
@@ -919,7 +951,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 }
 
 void RenderExecutor::RebindImages(PreparedBindings& prepared) {
-	KYTY_PROFILER_FUNCTION();
+	KYTY_PROFILER_BLOCK("RenderExecutor::RebindImages");
 	EXIT_IF(prepared.program == nullptr || prepared.snapshot == nullptr);
 	const auto& program  = *prepared.program;
 	const auto& snapshot = *prepared.snapshot;
@@ -967,30 +999,33 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	}
 }
 
-RenderExecutor::GraphicsBindings
+RenderExecutor::GraphicsBindings&
 RenderExecutor::PrepareGraphicsBindings(const ShaderStageRuntime& vertex,
                                         const ShaderStageRuntime& pixel, bool pixel_active) {
-	GraphicsBindings bindings {
-	    .vertex = PrepareBindings(vertex),
-	};
+	GraphicsBindings& bindings = m_graphics_bindings;
+	bindings.pixel_active      = pixel_active;
+
+	PrepareBindings(vertex, bindings.vertex);
 	if (pixel_active) {
-		bindings.pixel.emplace(PrepareBindings(pixel));
+		PrepareBindings(pixel, bindings.pixel);
+	} else {
+		bindings.pixel.Reset();
 	}
 	FindBuffers(bindings.vertex);
-	if (bindings.pixel) {
-		FindBuffers(*bindings.pixel);
+	if (pixel_active) {
+		FindBuffers(bindings.pixel);
 	}
 	if (bindings.vertex.program->info.uses_dma ||
-	    (bindings.pixel && bindings.pixel->program->info.uses_dma)) {
+	    (pixel_active && bindings.pixel.program->info.uses_dma)) {
 		m_context.GetGpuResources().PrepareBda();
 	}
 	RebindBuffers(bindings.vertex);
-	if (bindings.pixel) {
-		RebindBuffers(*bindings.pixel);
+	if (pixel_active) {
+		RebindBuffers(bindings.pixel);
 	}
 	RebindImages(bindings.vertex);
-	if (bindings.pixel) {
-		RebindImages(*bindings.pixel);
+	if (pixel_active) {
+		RebindImages(bindings.pixel);
 	}
 	return bindings;
 }
