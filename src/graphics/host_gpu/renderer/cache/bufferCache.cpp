@@ -103,6 +103,7 @@ void BufferCache::TouchBuffer(const Buffer& buffer) {
 }
 
 void BufferCache::DeleteBuffer(BufferId id) {
+	KYTY_PROFILER_BLOCK("BufferCache::DeleteBuffer");
 	auto* buffer = m_slot_buffers.try_get(id);
 	if (buffer == nullptr || buffer->is_deleted) {
 		return;
@@ -133,6 +134,7 @@ std::pair<uint64_t, uint64_t> BufferCache::DownloadEnvelope(const DownloadCopy& 
 }
 
 void BufferCache::DownloadBufferMemory(std::span<const DownloadCopy> copies) {
+	KYTY_PROFILER_BLOCK("BufferCache::DownloadBufferMemory");
 	std::vector<DownloadCopy> batch;
 	batch.reserve(copies.size());
 	uint64_t                  packed_size = 0;
@@ -239,6 +241,7 @@ BufferCache::~BufferCache() {
 }
 
 void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
+	KYTY_PROFILER_BLOCK("BufferCache::InvalidateMemory");
 	if (!GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: invalid memory-invalidation range\n");
 	}
@@ -247,6 +250,7 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 }
 
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
+	KYTY_PROFILER_BLOCK("BufferCache::ReadMemory");
 	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
 		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
@@ -368,6 +372,7 @@ void BufferCache::JoinOverlap(BufferId new_id, BufferId overlap_id, bool accumul
 }
 
 BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
+	KYTY_PROFILER_BLOCK("BufferCache::CreateBuffer");
 	EXIT_IF(m_scheduler.Current().IsInvalid());
 	const auto end = (vaddr + size + CACHING_PAGESIZE - 1) & ~(CACHING_PAGESIZE - 1);
 	vaddr &= ~(CACHING_PAGESIZE - 1);

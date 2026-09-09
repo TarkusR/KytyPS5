@@ -29,6 +29,8 @@ struct TextureCacheTestAccess;
 
 class TextureCache {
 public:
+	[[nodiscard]] uint64_t Generation() const noexcept { return m_generation; }
+
 	enum class BindingType : uint8_t { Texture, Storage, RenderTarget, DepthTarget, VideoOut };
 
 	struct ImageDesc {
@@ -165,6 +167,7 @@ private:
 	BlitHelper                                        m_blit_helper;
 	TileManager                                       m_tiler;
 	BufferCache&                                      m_buffer_cache;
+	uint64_t                                          m_generation = 1;
 	Common::SlotVector<Image>                         m_slot_images;
 	ImagePageTable                                    m_image_page_table;
 	std::unordered_map<vk::Format, ImageId>           m_null_images;
@@ -180,6 +183,7 @@ private:
 	bool             m_readback_linear_images = false;
 
 	friend struct TextureCacheTestAccess;
+	friend class RenderExecutor;
 	friend class BufferCache;
 	friend class RenderExecutor;
 };

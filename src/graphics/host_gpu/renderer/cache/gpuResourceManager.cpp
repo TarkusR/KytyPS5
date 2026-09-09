@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/cache/gpuResourceManager.h"
 
 #include "common/assert.h"
+#include "common/profiler.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 namespace Libs::Graphics {
@@ -16,6 +17,7 @@ bool GpuResourceManager::HandleFault(PageFaultAccess access, uint64_t fault_vadd
 	// resolve its page; guessing a width can cross the end of a valid guest mapping.
 	constexpr uint64_t fault_size = 1;
 	if (!IsMapped(fault_vaddr, fault_size)) {
+	KYTY_PROFILER_BLOCK("GpuResourceManager::HandleFault");
 		return false;
 	}
 	if (access == PageFaultAccess::Write) {
@@ -76,6 +78,7 @@ void GpuResourceManager::UnmapMemory(uint64_t vaddr, uint64_t size) {
 }
 
 void GpuResourceManager::PrepareBda() {
+	KYTY_PROFILER_BLOCK("GpuResourceManager::PrepareBda");
 	std::shared_lock lock(m_mapped_ranges_mutex);
 	m_mapped_ranges.ForEach([this](uint64_t start, uint64_t end) {
 		m_buffer_cache.SynchronizeBuffersInRange(start, end - start);
@@ -84,6 +87,7 @@ void GpuResourceManager::PrepareBda() {
 }
 
 void GpuResourceManager::RunGarbageCollector() {
+	KYTY_PROFILER_BLOCK("GpuResourceManager::RunGarbageCollector");
 	if (m_fault_process_pending) {
 		m_fault_process_pending = false;
 		m_buffer_cache.ProcessFaultBuffer();

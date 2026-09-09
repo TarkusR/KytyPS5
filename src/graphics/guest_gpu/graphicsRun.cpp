@@ -1194,6 +1194,7 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 }
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
+	KYTY_PROFILER_BLOCK("CommandProcessor::WaitFlipDone");
 	BufferFlush();
 
 	m_renderer.GetVideoOut().WaitFlipDone(static_cast<int>(video_out_handle),
@@ -1559,6 +1560,7 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 }
 
 void CommandProcessor::Flip() {
+	KYTY_PROFILER_BLOCK("CommandProcessor::Flip");
 	CheckBuffer();
 
 	if (GraphicsRunDebugDumpEnabled()) {

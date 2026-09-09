@@ -61,6 +61,7 @@ struct ShaderBinaryInfo {
 };
 
 static std::unique_ptr<std::unordered_map<uint64_t, ShaderMappedData>> g_shader_map;
+static std::atomic<uint64_t>                                           g_shader_map_generation {1};
 static std::mutex                                                      g_shader_map_mutex;
 
 void ShaderInit() {
@@ -75,6 +76,11 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	std::scoped_lock lock(g_shader_map_mutex);
 
 	(*g_shader_map)[addr] = data;
+	g_shader_map_generation.fetch_add(1, std::memory_order_release);
+}
+
+uint64_t ShaderMapGeneration() {
+	return g_shader_map_generation.load(std::memory_order_acquire);
 }
 
 static ShaderMappedData ShaderGetMappedData(uint64_t addr, const char* label) {

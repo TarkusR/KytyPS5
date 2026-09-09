@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include "common/assert.h"
+#include "common/profiler.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <algorithm>
@@ -544,7 +545,13 @@ public:
 	          std::span<const uint8_t> clean_flat_slots = {}, Evaluator* clean_evaluator = nullptr,
 	          Value active_mask = {})
 	    : m_program(program), m_runtime(runtime), m_clean_flat_slots(clean_flat_slots),
-	      m_clean_evaluator(clean_evaluator), m_active_mask(active_mask.Resolve()) {}
+	      m_clean_evaluator(clean_evaluator), m_active_mask(active_mask.Resolve()) {
+		// Each evaluator takes its own generation so a nested clean evaluator sharing the
+		// thread's scratch can never read another evaluator's cached values.
+		m_scratch = &ScratchFor();
+		m_scratch->Begin(program.eval_index_count);
+		m_generation = m_scratch->generation;
+	}
 
 	bool Evaluate(Value value, uint32_t& result) {
 		uint64_t wide = 0;
@@ -579,30 +586,40 @@ private:
 		if (inst == nullptr) {
 			return false;
 		}
-		if (!m_reserved) {
-			m_cache.reserve(m_program.value_storage.size());
-			m_visiting.reserve(m_program.value_storage.size());
-			m_reserved = true;
-		}
 		if (!m_active_mask.IsEmpty() && IsRuntimeSelect(inst->GetOpcode()) &&
 		    inst->NumArgs() == 3 && inst->Arg(0).Resolve() == m_active_mask) {
 			return EvaluateWide(inst->Arg(1), result);
 		}
-		if (const auto found = m_cache.find(inst); found != m_cache.end()) {
-			result = found->second;
+		// Indexed scratch instead of a hash map: the map was reallocated on the first node of
+		// every call, and cycle detection was a linear scan of the visiting stack.
+		const auto index     = inst->EvalIndex();
+		const bool cacheable = index < m_scratch->stamps.size();
+		if (cacheable && m_scratch->stamps[index] == m_generation &&
+		    m_scratch->owners[index] == inst) {
+			result = m_scratch->values[index];
 			return true;
 		}
-		if (std::ranges::find(m_visiting, inst) != m_visiting.end()) {
+		if (cacheable && m_scratch->visiting[index] == m_generation &&
+		    m_scratch->owners[index] == inst) {
 			return false;
 		}
-		m_visiting.push_back(inst);
-		uint64_t out = 0;
+		if (cacheable) {
+			m_scratch->visiting[index] = m_generation;
+			m_scratch->owners[index]   = inst;
+		}
+		uint64_t   out       = 0;
 		const bool evaluated = EvaluateInst(*inst, out);
-		m_visiting.pop_back();
+		if (cacheable) {
+			m_scratch->visiting[index] = 0;
+		}
 		if (!evaluated) {
 			return false;
 		}
-		m_cache.emplace(inst, out);
+		if (cacheable) {
+			m_scratch->stamps[index] = m_generation;
+			m_scratch->values[index] = out;
+			m_scratch->owners[index] = inst;
+		}
 		result = out;
 		return true;
 	}
@@ -1071,9 +1088,33 @@ private:
 	std::span<const uint8_t>                  m_clean_flat_slots;
 	Evaluator*                                m_clean_evaluator = nullptr;
 	Value                                     m_active_mask;
-	std::unordered_map<const Inst*, uint64_t> m_cache;
-	std::vector<const Inst*>                  m_visiting;
-	bool                                      m_reserved = false;
+	struct Scratch {
+		std::vector<uint64_t>    values;
+		std::vector<uint32_t>    stamps;
+		std::vector<uint32_t>    visiting;
+		std::vector<const Inst*> owners;
+		uint32_t                 generation = 0;
+
+		void Begin(size_t count) {
+			if (values.size() < count) {
+				values.resize(count);
+				stamps.resize(count, 0u);
+				visiting.resize(count, 0u);
+				owners.resize(count, nullptr);
+			}
+			if (++generation == 0) {
+				std::ranges::fill(stamps, 0u);
+				std::ranges::fill(visiting, 0u);
+				generation = 1;
+			}
+		}
+	};
+	static Scratch& ScratchFor() {
+		static thread_local Scratch scratch;
+		return scratch;
+	}
+	Scratch* m_scratch    = nullptr;
+	uint32_t m_generation = 0;
 };
 
 const DescriptorSource* Source(const ResourcePlan& program, uint32_t source) {
@@ -1097,24 +1138,38 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 	}
 	SrtRuntime clean_runtime  = runtime;
 	clean_runtime.read_memory = runtime.read_specialization_memory;
-	Evaluator            clean_evaluator(program, clean_runtime);
-	Evaluator            evaluator(program, runtime, clean_flat_slots, &clean_evaluator);
-	std::vector<uint8_t> active;
+	std::optional<Evaluator> clean_holder;
+	std::optional<Evaluator> eval_holder;
+	{
+		KYTY_PROFILER_BLOCK("SrtEval::EvaluatorSetup");
+		clean_holder.emplace(program, clean_runtime);
+		eval_holder.emplace(program, runtime, clean_flat_slots, &*clean_holder);
+	}
+	Evaluator& clean_evaluator = *clean_holder;
+	Evaluator& evaluator       = *eval_holder;
+	// This runs once per shader stage per draw, so every scratch buffer is reused between
+	// calls instead of being reallocated.
+	static thread_local std::vector<uint8_t> active;
+	active.clear();
 	if (evaluate_flat) {
 		active.assign(program.descriptor_sources.size(), 1u);
 	}
 	if (evaluate_flat && !program.control_flow.empty()) {
 		for (const auto& block: program.control_flow) {
 			for (const auto source: block.sources) {
-				active.at(source) = 0u;
+				active[source] = 0u;
 			}
 		}
-		std::vector<uint8_t>  visited(program.control_flow.size());
-		std::vector<uint32_t> pending {0};
+		static thread_local std::vector<uint8_t>  visited;
+		static thread_local std::vector<uint32_t> pending;
+		visited.clear();
+		visited.resize(program.control_flow.size());
+		pending.clear();
+		pending.push_back(0);
 		while (!pending.empty()) {
 			const auto index = pending.back();
 			pending.pop_back();
-			if (visited.at(index)) {
+			if (visited[index]) {
 				continue;
 			}
 			visited[index]    = 1u;
@@ -1132,8 +1187,10 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 			}
 		}
 	}
-	std::vector<DescriptorValue> evaluated;
+	auto& evaluated = results;
+	evaluated.clear();
 	evaluated.reserve(sources.size());
+	KYTY_PROFILER_BLOCK("SrtEval::SourceLoop");
 	for (const auto source_index: sources) {
 		const auto* source = Source(program, source_index);
 		if (source == nullptr) {
@@ -1150,8 +1207,11 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 		}
 		evaluated.push_back(value);
 	}
-	std::vector<uint32_t> flattened;
+	auto& flattened = flat;
 	if (evaluate_flat) {
+		// Reused buffer: clear first so unwritten slots keep the zero-initialised meaning they
+		// had when this was a fresh vector.
+		flattened.clear();
 		flattened.resize(program.srt_reads.size());
 		for (const auto& read: program.srt_reads) {
 			const bool clean    = read.flat_offset < clean_flat_slots.size() &&
@@ -1163,10 +1223,10 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 			}
 		}
 	}
-	results = std::move(evaluated);
-	active_sources = std::move(active);
 	if (evaluate_flat) {
-		flat = std::move(flattened);
+		active_sources.assign(active.begin(), active.end());
+	} else {
+		active_sources.clear();
 	}
 	return true;
 }
@@ -1191,6 +1251,16 @@ void BuildSrtPlan(Program& program) {
 	}
 	program.srt_plan_complete = false;
 	PlanBuilder(program).Run();
+	uint32_t eval_index = 0;
+	for (auto& inst: program.value_storage) {
+		inst.SetEvalIndex(eval_index++);
+	}
+	for (auto* block: program.blocks) {
+		for (auto& inst: block->Instructions()) {
+			inst.SetEvalIndex(eval_index++);
+		}
+	}
+	program.eval_index_count  = eval_index;
 	program.srt_plan_complete = true;
 }
 

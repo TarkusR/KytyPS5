@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include "common/assert.h"
+#include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/shaderBindings.h"
@@ -573,12 +574,15 @@ static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& r
 	if (program.requires_specialization_memory && runtime.read_specialization_memory == nullptr) {
 		return fail("indirect image needs a specialization memory reader");
 	}
-	std::vector<DescriptorValue> values;
-	std::vector<uint32_t>        flattened_srt;
-	std::vector<uint8_t>         active_sources;
-	if (!EvaluateRuntimeSources(program, program.materialization_sources, runtime, values,
-	                            flattened_srt, program.clean_flat_slots, active_sources)) {
-		return fail("a descriptor source did not evaluate");
+	static thread_local std::vector<DescriptorValue> values;
+	static thread_local std::vector<uint32_t>        flattened_srt;
+	static thread_local std::vector<uint8_t>         active_sources;
+	{
+		KYTY_PROFILER_BLOCK("Materialize::EvaluateRuntimeSources");
+		if (!EvaluateRuntimeSources(program, program.materialization_sources, runtime, values,
+		                            flattened_srt, program.clean_flat_slots, active_sources)) {
+			return fail("a descriptor source did not evaluate");
+		}
 	}
 
 	auto&                   next  = snapshot.resources;
@@ -1283,6 +1287,11 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 			                   plan.clean_flat_slots);
 		}
 	}
+	uint32_t eval_index = 0;
+	for (auto& inst: plan.value_storage) {
+		inst.SetEvalIndex(eval_index++);
+	}
+	plan.eval_index_count = eval_index;
 	return plan;
 }
 
